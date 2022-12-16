@@ -19,7 +19,7 @@
 
 ## Quickstart
 
-- `Base file config`
+- **Base file config**
 
 ```rust
 #[test]
@@ -34,7 +34,7 @@ fn base_test() {
 
 
 
-- `Dynamic file config`
+- **Dynamic file config**
 
 ```rust
 #[tokio::test]
@@ -57,7 +57,7 @@ async fn dynamic_test() {
 
 
 
-- `Dynamic Apollo config`
+- **Dynamic Apollo config**
 
 ```rust
 
@@ -89,5 +89,3 @@ async fn apollo_test() {
 }
 
 ```
-
-[crate]: 
