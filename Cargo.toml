@@ -1,6 +1,6 @@
 [package]
 name = "kosei"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["iGxnon"]
 license = "MIT"
@@ -11,6 +11,11 @@ A easy-to-use configuration crate with the Rust programming language.
 categories = ["config"]
 keywords = ["config", "apollo", "configuration"]
 repository = "https://github.com/iGxnon/kosei"
+
+[features]
+default = ["file"]
+file = []
+apollo = []
 
 [dependencies.parking_lot]
 version = "0.12"
