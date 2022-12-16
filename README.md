@@ -6,9 +6,16 @@
 ## Features
 
 - Support `toml`,`yaml`,`json` configuration type.
-- Dynamic configuration
+- **Dynamic configuration**
   - hot reload
-  - support `file` and [Apollo config](https://github.com/apolloconfig/apollo)
+  - support from local file and [Apollo config](https://github.com/apolloconfig/apollo)
+
+[![Crates.io][crates-badge]][crates-url]
+[![Crates.io][crates-download]][crates-url]
+
+[crates-badge]: https://flat.badgen.net/crates/v/kosei
+[crates-download]: https://flat.badgen.net/crates/d/kosei
+[crates-url]: https://crates.io/crates/kosei
 
 ## Quickstart
 
@@ -82,3 +89,5 @@ async fn apollo_test() {
 }
 
 ```
+
+[crate]: 
