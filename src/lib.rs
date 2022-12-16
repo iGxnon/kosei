@@ -11,7 +11,7 @@ pub use nacos::*;
 pub use test_data::*;
 
 use notify::{recommended_watcher, RecommendedWatcher, RecursiveMode, Watcher};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RawMutex};
 use std::fmt::Debug;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -34,8 +34,8 @@ pub(crate) struct Raw {
 }
 
 impl<T> Config<T>
-    where
-        T: Clone,
+where
+    T: Clone,
 {
     pub fn as_inner(&self) -> &T {
         &self.0
@@ -74,8 +74,8 @@ fn parse_type(path: impl AsRef<Path>) -> ConfigType {
 }
 
 impl<T> TryFrom<Raw> for Config<T>
-    where
-        T: serde::de::DeserializeOwned,
+where
+    T: serde::de::DeserializeOwned,
 {
     type Error = Error;
 
@@ -83,21 +83,21 @@ impl<T> TryFrom<Raw> for Config<T>
         let config = match raw.typ {
             ConfigType::TOML => Self(toml::from_str(&raw.raw_str)?),
             ConfigType::YAML => Self(serde_yaml::from_str(&raw.raw_str)?),
-            ConfigType::JSON => Self(serde_json::from_str(&raw.raw_str)?)
+            ConfigType::JSON => Self(serde_json::from_str(&raw.raw_str)?),
         };
         Ok(config)
     }
 }
 
 impl<T> Config<T>
-    where
-        T: serde::de::DeserializeOwned,
+where
+    T: serde::de::DeserializeOwned,
 {
     pub fn new(raw: String, typ: ConfigType) -> Self {
         match typ {
             ConfigType::TOML => Self(toml::from_str(&raw).unwrap()),
             ConfigType::YAML => Self(serde_yaml::from_str(&raw).unwrap()),
-            ConfigType::JSON => Self(serde_json::from_str(&raw).unwrap())
+            ConfigType::JSON => Self(serde_json::from_str(&raw).unwrap()),
         }
     }
 
@@ -109,17 +109,38 @@ impl<T> Config<T>
 
 #[cfg(test)]
 mod test {
-    // use super::*;
+    use super::*;
+
+    #[test]
+    fn config_test() {
+        let _: Config<Entry> = Config::new(ENTRY_RAW_YML.to_string(), ConfigType::YAML);
+        let _: Config<Entry> = Config::new(ENTRY_RAW_TOML.to_string(), ConfigType::TOML);
+        let _: Config<Entry> = Config::new(ENTRY_RAW_JSON.to_string(), ConfigType::JSON);
+    }
     //
     // #[test]
-    // fn file_test() {
-    //     let _: Config<Entry> = Config::from_file("../config/config.test.yml");
-    //     let _: Config<Entry> = Config::from_file("../config/config.test.toml");
+    // fn base_test() {
+    //     // panic if no such file `config/config.yaml`
+    //     let config: Config<Entry> = Config::from_file("config/config.yaml");
+    //     let entry: &Entry = config.as_inner(); // borrowed value has the same lifetimes as config
+    //     let entry: Entry = config.to_inner(); // clone a new Entry
+    //     let entry: Entry = config.into_inner(); // take ownership
     // }
     //
-    // #[test]
-    // fn config_test() {
-    //     let _: Config<Entry> = Config::new("x: 1.0\ny: 2.0\n".to_string(), ConfigType::YAML);
-    //     let _: Config<Entry> = Config::new("x = 1.0\ny = 2.0\n".to_string(), ConfigType::TOML);
+    // #[tokio::test]
+    // async fn dynamic_test() {
+    //     // Create a dynamic config and a watcher
+    //     let (config, mut watcher) = DynamicConfig::<Entry>::watch_file("config/config.yaml");
+    //     // Listen to file modify event
+    //     watcher.watch().unwrap();
+    //     let lock = config.lock();
+    //     let entry: &Entry = lock.as_inner();  // borrow Entry
+    //     let entry: Entry = lock.to_inner();  // clone a new Entry
+    //     // let entry: Entry = lock.into_inner(); panic! cannot take the lock ownership
+    //     let arc = config.as_arc();  // clone a new arc
+    //     // Stop watching
+    //     watcher.stop().unwrap();
+    //     // You can watch twice
+    //     watcher.watch().unwrap();
     // }
 }

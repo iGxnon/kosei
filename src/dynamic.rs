@@ -20,12 +20,16 @@ impl<T> DynamicConfig<T>
 where
     T: Clone,
 {
-    pub fn as_inner(&self) -> Arc<Mutex<Config<T>>> {
+    pub fn as_arc(&self) -> Arc<Mutex<Config<T>>> {
         Arc::clone(&self.0)
     }
 
-    pub fn into_inner(self) -> Arc<Mutex<Config<T>>> {
+    pub fn into_arc(self) -> Arc<Mutex<Config<T>>> {
         self.0
+    }
+
+    pub fn lock(&self) -> parking_lot::lock_api::MutexGuard<'_, RawMutex, Config<T>> {
+        self.0.lock()
     }
 
     pub fn to_inner(&self) -> T {
@@ -141,17 +145,17 @@ impl InnerWatcher for FileWatcher {
     }
 }
 
-#[cfg(test)]
-mod test {
-    // use super::*;
-    //
-    // #[tokio::test]
-    // async fn dynamic_config() {
-    //     tracing_subscriber::fmt::init();
-    //     let (_, mut watcher) =
-    //         DynamicConfig::<Entry>::watch_file("../config/config.test.json");
-    //     watcher.verbose();
-    //     watcher.watch().unwrap();
-    //     watcher.stop().unwrap();
-    // }
-}
+// #[cfg(test)]
+// mod test {
+//     use super::*;
+//
+//     #[tokio::test]
+//     async fn dynamic_config() {
+//         tracing_subscriber::fmt::init();
+//         let (_, mut watcher) =
+//             DynamicConfig::<Entry>::watch_file("../config/config.test.json");
+//         watcher.verbose();
+//         watcher.watch().unwrap();
+//         watcher.stop().unwrap();
+//     }
+// }

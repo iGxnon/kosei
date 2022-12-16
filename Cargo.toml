@@ -5,6 +5,11 @@ edition = "2021"
 authors = ["iGxnon"]
 license = "MIT"
 readme = "README.md"
+description = """
+A easy-to-use configuration crate with the Rust programming language.
+"""
+categories = ["config"]
+keywords = ["config", "apollo", "configuration"]
 
 [dependencies.parking_lot]
 version = "0.12"

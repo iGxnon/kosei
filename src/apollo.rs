@@ -1,6 +1,6 @@
 use super::*;
 
-const CACHE_FETCH_THRESHOLD: Duration = Duration::from_secs(30 * 60);  // 30 minutes
+const CACHE_FETCH_THRESHOLD: Duration = Duration::from_secs(30 * 60); // 30 minutes
 
 #[derive(Clone)]
 pub struct ApolloClient {
@@ -158,7 +158,7 @@ impl ApolloClient {
             .get(self.notify_url(notify_id))
             .send()
             .await?;
-        if resp.status() == http::StatusCode::NOT_MODIFIED {
+        if resp.status().as_u16() == 304 {
             return Ok(notify_id);
         }
         let new_id = resp
@@ -355,22 +355,21 @@ where
     // }
 }
 
-#[cfg(test)]
-mod test {
-    // use super::*;
-    //
-    // #[tokio::test]
-    // async fn apollo_test() {
-    //     tracing_subscriber::fmt::init();
-    //     let client = ApolloClient::new("http://localhost:8080")
-    //         .appid("114514")
-    //         .namespace("test", ConfigType::TOML);
-    //     let (config, mut watcher) =
-    //         DynamicConfig::<Entry>::watch_apollo(client, WatchMode::RealTime).await;
-    //     watcher.verbose();
-    //     watcher.watch().unwrap();
-    //     println!("{:?}", config);
-    //     tokio::time::sleep(Duration::from_secs(10)).await;
-    //     println!("{:?}", config);
-    // }
-}
+// #[cfg(test)]
+// mod test {
+//     use super::*;
+//
+//     #[tokio::test]
+//     async fn apollo_test() {
+//         let client = ApolloClient::new("http://localhost:8080")
+//             .appid("114514")
+//             .namespace("test", ConfigType::TOML);
+//         let (config, mut watcher) =
+//             DynamicConfig::<Entry>::watch_apollo(client, WatchMode::RealTime).await;
+//         watcher.verbose();
+//         watcher.watch().unwrap();
+//         println!("{:?}", config);
+//         tokio::time::sleep(Duration::from_secs(10)).await;
+//         println!("{:?}", config);
+//     }
+// }
