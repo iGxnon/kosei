@@ -17,11 +17,13 @@ pub struct ApolloClient {
 #[derive(Debug, Default, Clone)]
 pub struct Metadata(String);
 
+#[cfg(feature = "dynamic")]
 pub enum WatchMode {
     RealTime,           // RealTime configuration updating (about 1s, based on Http long polling)
     Interval(Duration), // Each interval is updated, preferably greater than 30s, several hours or days are recommended
 }
 
+#[cfg(feature = "dynamic")]
 pub struct ApolloWatcher {
     client: ApolloClient,
     tx: broadcast::Sender<Raw>,
@@ -226,6 +228,7 @@ where
     }
 }
 
+#[cfg(feature = "dynamic")]
 impl ApolloWatcher {
     fn watch_interval(
         &mut self,
@@ -303,6 +306,7 @@ impl ApolloWatcher {
     }
 }
 
+#[cfg(feature = "dynamic")]
 impl InnerWatcher for ApolloWatcher {
     fn watch(&mut self) -> Result<(), Error> {
         self.stop()?;
@@ -322,6 +326,7 @@ impl InnerWatcher for ApolloWatcher {
     }
 }
 
+#[cfg(feature = "dynamic")]
 impl<T> DynamicConfig<T>
 where
     T: serde::de::DeserializeOwned + Clone + 'static,

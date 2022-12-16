@@ -13,8 +13,8 @@ keywords = ["config", "apollo", "configuration"]
 repository = "https://github.com/iGxnon/kosei"
 
 [features]
-default = ["file"]
-file = []
+default = ["dynamic"]
+dynamic = []
 apollo = []
 
 [dependencies.parking_lot]

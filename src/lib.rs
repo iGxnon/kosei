@@ -1,5 +1,6 @@
 #[cfg(feature = "apollo")]
 mod apollo;
+#[cfg(feature = "dynamic")]
 mod dynamic;
 mod nacos;
 #[cfg(test)]
@@ -7,6 +8,7 @@ mod test_data;
 
 #[cfg(feature = "apollo")]
 pub use apollo::*;
+#[cfg(feature = "dynamic")]
 pub use dynamic::*;
 pub use nacos::*;
 #[cfg(test)]
