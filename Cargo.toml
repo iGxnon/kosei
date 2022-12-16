@@ -10,6 +10,7 @@ A easy-to-use configuration crate with the Rust programming language.
 """
 categories = ["config"]
 keywords = ["config", "apollo", "configuration"]
+repository = "https://github.com/iGxnon/kosei"
 
 [dependencies.parking_lot]
 version = "0.12"
