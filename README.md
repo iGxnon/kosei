@@ -17,7 +17,33 @@
 [crates-download]: https://flat.badgen.net/crates/d/kosei
 [crates-url]: https://crates.io/crates/kosei
 
+## Import
+
+- Default with dynamic file configuration
+
+```toml
+[dependencies]
+kosei = { version = "0.1" }
+```
+
+- Enable Apollo feature
+
+```toml
+[dependencies]
+kosei = { version = "0.1", features = ["apollo"] }
+```
+
 ## Quickstart
+
+Config Entry
+
+```rust
+ // `Deserialize` and `Clone` traits should be applied
+#[derive(Clone, Debug, Deserialize)]
+struct Entry {
+...
+}
+```
 
 - **Base file config**
 
