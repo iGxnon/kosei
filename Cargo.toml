@@ -1,6 +1,6 @@
 [package]
 name = "kosei"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 authors = ["iGxnon"]
 license = "MIT"
@@ -16,6 +16,7 @@ repository = "https://github.com/iGxnon/kosei"
 default = ["dynamic"]
 dynamic = []
 apollo = []
+full = ["dynamic", "apollo"]
 
 [dependencies.parking_lot]
 version = "0.12"
@@ -49,3 +50,20 @@ version = "0.5"
 
 [dependencies.urlencoding]
 version = "2.1"
+
+[dependencies.sha1]
+version = "0.10"
+
+[dependencies.hmac]
+version = "0.12"
+
+[dependencies.base64]
+version = "0.20"
+
+[dev-dependencies.tokio]
+version = "1.23.0"
+features = ["full"]
+
+[dev-dependencies.kosei]
+path = "."
+features = ["full"]

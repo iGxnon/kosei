@@ -1,6 +1,17 @@
 use super::*;
+use hmac::{Hmac, Mac};
+use parking_lot::Mutex;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::broadcast;
+use tokio::task::JoinHandle;
+use tracing::{error, trace};
 
-const CACHE_FETCH_THRESHOLD: Duration = Duration::from_secs(30 * 60); // 30 minutes
+const CACHE_FETCH_THRESHOLD: Duration = Duration::from_secs(30 * 60);
+// 30 minutes
+const APOLLO_HTTP_HEADER_AUTHORIZATION: &str = "Authorization";
+const APOLLO_HTTP_HEADER_TIMESTAMP: &str = "Timestamp";
+const APOLLO_SIG_DELIMITER: &str = "\n";
 
 #[derive(Clone)]
 pub struct ApolloClient {
@@ -11,6 +22,7 @@ pub struct ApolloClient {
     namespace_type: ConfigType,
     release_key: String,
     local_ip: String,
+    secret: Option<String>,
 }
 
 // releaseKey
@@ -19,7 +31,8 @@ pub struct Metadata(String);
 
 #[cfg(feature = "dynamic")]
 pub enum WatchMode {
-    RealTime,           // RealTime configuration updating (about 1s, based on Http long polling)
+    RealTime,
+    // RealTime configuration updating (about 1s, based on Http long polling)
     Interval(Duration), // Each interval is updated, preferably greater than 30s, several hours or days are recommended
 }
 
@@ -41,14 +54,16 @@ impl Default for ApolloClient {
             release_key: "".to_string(),
             local_ip: "".to_string(),
             namespace_type: ConfigType::TOML,
+            secret: None,
         }
     }
 }
 
 impl ApolloClient {
+    // a http uri, such as 'http://localhost:8080'
     pub fn new(uri: &str) -> Self {
         Self {
-            server_url: uri.to_string(),
+            server_url: uri.trim_end_matches('/').to_string(),
             ..Default::default()
         }
     }
@@ -59,7 +74,7 @@ impl ApolloClient {
         self
     }
 
-    // Required
+    // Required, default set to `default`
     pub fn cluster(mut self, cluster: &str) -> Self {
         self.cluster_name = cluster.to_string();
         self
@@ -86,6 +101,16 @@ impl ApolloClient {
         self
     }
 
+    pub fn secret(mut self, access_secret: &str) -> Self {
+        self.secret = Some(access_secret.to_string());
+        self
+    }
+
+    pub fn some_secret(mut self, access_secret: Option<&str>) -> Self {
+        self.secret = access_secret.map(ToString::to_string);
+        self
+    }
+
     // Optional
     pub fn release_key(mut self, key: &str) -> Self {
         self.release_key = key.to_string();
@@ -98,40 +123,24 @@ impl ApolloClient {
         self
     }
 
-    // // Only support `.properties`
-    // // NOTICE: make sure namespace must be a `.properties` type
-    // pub async fn fetch_properties(&self) -> Result<(HashMap<String, String>, Metadata), Error> {
-    //     let resp = reqwest::get(self.nocache_url())
-    //         .await?
-    //         .json::<serde_json::Value>()
-    //         .await?;
-    //     let config = resp
-    //         .get("configurations")
-    //         .map(ToOwned::to_owned)
-    //         .map(serde_json::from_value::<HashMap<String, String>>)
-    //         .unwrap_or_else(|| Ok(HashMap::new()))?;
-    //     let release_key = resp
-    //         .get("releaseKey")
-    //         .and_then(|v| v.as_str())
-    //         .map(ToString::to_string)
-    //         .unwrap_or_else(|| "".to_string());
-    //     Ok((config, Metadata(release_key)))
-    // }
-
     // Not support `.properties`
     // NOTICE: make sure namespace had been published and set to a support config type
     // (responses should contains `configurations.content`)
     pub async fn fetch(&self) -> Result<(String, Metadata), Error> {
-        let resp = reqwest::get(self.nocache_url())
-            .await?
-            .json::<serde_json::Value>()
-            .await?;
+        let url = self.nocache_url();
+        let resp = self.request_builder(&url).build()?.get(url).send().await?;
+
+        resp.error_for_status_ref()?;
+
+        let resp = resp.json::<serde_json::Value>().await?;
+
         let config = resp
             .get("configurations")
             .and_then(|v| v.get("content"))
             .and_then(|v| v.as_str())
             .map(ToString::to_string)
             .unwrap_or_else(|| "".to_string());
+
         let release_key = resp
             .get("releaseKey")
             .and_then(|v| v.as_str())
@@ -141,8 +150,12 @@ impl ApolloClient {
     }
 
     pub async fn cached_fetch(&self) -> Result<String, Error> {
-        let config = reqwest::get(self.cached_url())
-            .await?
+        let url = self.cached_url();
+        let resp = self.request_builder(&url).build()?.get(url).send().await?;
+
+        resp.error_for_status_ref()?;
+
+        let config = resp
             .json::<serde_json::Value>()
             .await?
             .get("content")
@@ -154,15 +167,21 @@ impl ApolloClient {
 
     // fetch notification id, if not updated, returns the same as the input notify_id.
     pub async fn notification_fetch(&self, notify_id: isize) -> Result<isize, Error> {
-        let resp = reqwest::ClientBuilder::new()
+        let url = self.notify_url(notify_id);
+        let resp = self
+            .request_builder(&url)
             .timeout(Duration::from_secs(70))
             .build()?
-            .get(self.notify_url(notify_id))
+            .get(url)
             .send()
             .await?;
+
+        resp.error_for_status_ref()?;
+
         if resp.status().as_u16() == 304 {
             return Ok(notify_id);
         }
+
         let new_id = resp
             .json::<serde_json::Value>()
             .await?
@@ -173,6 +192,47 @@ impl ApolloClient {
             .map(|v| v as isize)
             .unwrap_or(notify_id);
         Ok(new_id)
+    }
+
+    fn request_builder(&self, url: &str) -> reqwest::ClientBuilder {
+        let client_builder = reqwest::Client::builder();
+        if let Some(secret) = &self.secret {
+            let path_with_query = url.trim_start_matches(&self.server_url);
+
+            let mut mac = Hmac::<sha1::Sha1>::new_from_slice(secret.as_bytes())
+                .expect("HMAC can take key of any size");
+
+            let timestamp_millis = {
+                let now = std::time::SystemTime::now();
+                now.duration_since(std::time::UNIX_EPOCH)
+                    .expect("Time went backwards")
+                    .as_millis()
+            };
+
+            mac.update(
+                format!(
+                    "{}{}{}",
+                    timestamp_millis, APOLLO_SIG_DELIMITER, path_with_query
+                )
+                    .as_bytes(),
+            );
+
+            let sig_arr = mac.finalize().into_bytes();
+            let sig = base64::encode(sig_arr);
+
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                APOLLO_HTTP_HEADER_AUTHORIZATION,
+                format!("Apollo {}:{}", self.appid, sig).parse().unwrap(),
+            );
+            headers.insert(
+                APOLLO_HTTP_HEADER_TIMESTAMP,
+                timestamp_millis.to_string().parse().unwrap(),
+            );
+
+            return client_builder.default_headers(headers);
+        }
+        client_builder
     }
 
     fn nocache_url(&self) -> String {
@@ -214,8 +274,8 @@ impl ApolloClient {
 }
 
 impl<T> Config<T>
-where
-    T: serde::de::DeserializeOwned,
+    where
+        T: serde::de::DeserializeOwned,
 {
     pub async fn from_apollo(client: &ApolloClient) -> Result<Self, Error> {
         let (raw_str, _) = client.fetch().await?;
@@ -223,7 +283,7 @@ where
             raw_str,
             typ: client.namespace_type,
         }
-        .try_into()?;
+            .try_into()?;
         Ok(config)
     }
 }
@@ -328,8 +388,8 @@ impl InnerWatcher for ApolloWatcher {
 
 #[cfg(feature = "dynamic")]
 impl<T> DynamicConfig<T>
-where
-    T: serde::de::DeserializeOwned + Clone + 'static,
+    where
+        T: serde::de::DeserializeOwned + Clone + 'static,
 {
     pub async fn watch_apollo(
         client: ApolloClient,
@@ -353,28 +413,4 @@ where
         };
         (Self(config), watcher)
     }
-
-    // TODO implement webhook dynamic configuration
-    // pub fn webhook_apollo() {
-    //     unimplemented!()
-    // }
 }
-
-// #[cfg(test)]
-// mod test {
-//     use super::*;
-//
-//     #[tokio::test]
-//     async fn apollo_test() {
-//         let client = ApolloClient::new("http://localhost:8080")
-//             .appid("114514")
-//             .namespace("test", ConfigType::TOML);
-//         let (config, mut watcher) =
-//             DynamicConfig::<Entry>::watch_apollo(client, WatchMode::RealTime).await;
-//         watcher.verbose();
-//         watcher.watch().unwrap();
-//         println!("{:?}", config);
-//         tokio::time::sleep(Duration::from_secs(10)).await;
-//         println!("{:?}", config);
-//     }
-// }
