@@ -35,10 +35,12 @@ kosei = { version = "0.1", features = ["apollo"] }
 
 ## Quickstart
 
+> See [`examples`](examples) for further use.
+
 Config Entry
 
 ```rust
- // `Deserialize` and `Clone` traits should be applied
+// `Deserialize` and `Clone` traits should be applied
 #[derive(Clone, Debug, Deserialize)]
 struct Entry {
 ...
@@ -57,8 +59,6 @@ fn base_test() {
   let entry: Entry = config.into_inner(); // take ownership
 }
 ```
-
-
 
 - **Dynamic file config**
 
@@ -80,8 +80,6 @@ async fn dynamic_test() {
   watcher.watch().unwrap();
 }
 ```
-
-
 
 - **Dynamic Apollo config**
 
