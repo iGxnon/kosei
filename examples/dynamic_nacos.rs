@@ -1,4 +1,4 @@
-use kosei::{ApolloClient, ConfigType, DynamicConfig, InnerWatcher, WatchMode};
+use kosei::{ConfigType, DynamicConfig, InnerWatcher, NacosClient};
 use serde::Deserialize;
 use std::time::Duration;
 
@@ -10,11 +10,12 @@ struct Entry {
 
 #[tokio::main]
 async fn main() {
-    let client = ApolloClient::new("http://localhost:8080")
-        .appid("test")
-        .namespace("test", ConfigType::YAML);
+    let client = NacosClient::new("http://localhost:8848")
+        .data_id("test")
+        .credential("nacos", "nacos")
+        .config_type(ConfigType::YAML);
     let (config, mut watcher) =
-        DynamicConfig::<Entry>::watch_apollo(client, WatchMode::RealTime).await;
+        DynamicConfig::<Entry>::watch_nacos(client, Duration::from_secs(5)).await;
 
     watcher.watch().unwrap();
 

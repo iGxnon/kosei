@@ -2,6 +2,7 @@
 mod apollo;
 #[cfg(feature = "dynamic")]
 mod dynamic;
+#[cfg(feature = "nacos")]
 mod nacos;
 #[cfg(test)]
 mod test_data;
@@ -10,6 +11,7 @@ mod test_data;
 pub use apollo::*;
 #[cfg(feature = "dynamic")]
 pub use dynamic::*;
+#[cfg(feature = "nacos")]
 pub use nacos::*;
 #[cfg(test)]
 use test_data::*;
@@ -58,14 +60,11 @@ fn parse_type(path: impl AsRef<Path>) -> ConfigType {
     let sub = ["toml", "yml", "yaml", "json"]
         .into_iter()
         .find(|typ| path.to_str().unwrap().ends_with(typ));
-    if sub.is_none() {
-        panic!("only support yaml, toml and json");
-    }
-    match sub.unwrap() {
-        "toml" => ConfigType::TOML,
-        "json" => ConfigType::JSON,
-        "yml" | "yaml" => ConfigType::YAML,
-        _ => unreachable!(),
+    match sub {
+        Some("toml") => ConfigType::TOML,
+        Some("json") => ConfigType::JSON,
+        Some("yml") | Some("yaml") => ConfigType::YAML,
+        _ => panic!("only support yaml, toml and json"),
     }
 }
 
@@ -113,30 +112,4 @@ mod test {
         let _: Config<Entry> = Config::new(ENTRY_RAW_TOML.to_string(), ConfigType::TOML);
         let _: Config<Entry> = Config::new(ENTRY_RAW_JSON.to_string(), ConfigType::JSON);
     }
-    //
-    // #[test]
-    // fn base_test() {
-    //     // panic if no such file `config/config.yaml`
-    //     let config: Config<Entry> = Config::from_file("config/config.yaml");
-    //     let entry: &Entry = config.as_inner(); // borrowed value has the same lifetimes as config
-    //     let entry: Entry = config.to_inner(); // clone a new Entry
-    //     let entry: Entry = config.into_inner(); // take ownership
-    // }
-    //
-    // #[tokio::test]
-    // async fn dynamic_test() {
-    //     // Create a dynamic config and a watcher
-    //     let (config, mut watcher) = DynamicConfig::<Entry>::watch_file("config/config.yaml");
-    //     // Listen to file modify event
-    //     watcher.watch().unwrap();
-    //     let lock = config.lock();
-    //     let entry: &Entry = lock.as_inner();  // borrow Entry
-    //     let entry: Entry = lock.to_inner();  // clone a new Entry
-    //     // let entry: Entry = lock.into_inner(); panic! cannot take the lock ownership
-    //     let arc = config.as_arc();  // clone a new arc
-    //     // Stop watching
-    //     watcher.stop().unwrap();
-    //     // You can watch twice
-    //     watcher.watch().unwrap();
-    // }
 }

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
-use tracing::info;
+use tracing::trace;
 
 #[derive(Debug)]
 pub struct DynamicConfig<T>(pub(crate) Arc<Mutex<Config<T>>>);
@@ -15,7 +15,6 @@ pub struct DynamicConfigWatcher<T, W> {
     pub(crate) inner_watcher: W,
     pub(crate) handle: Option<JoinHandle<()>>,
     pub(crate) topic: broadcast::Sender<Raw>,
-    pub(crate) verbose: bool,
 }
 
 pub struct FileWatcher {
@@ -75,17 +74,9 @@ where
             },
             handle: None,
             topic,
-            verbose: false,
         };
         let dynamic_config = Self(config);
         (dynamic_config, config_watcher)
-    }
-}
-impl<C, W> DynamicConfigWatcher<C, W> {
-    // Enable verbose mode
-    // output the configuration update to the log with the level of INFO
-    pub fn verbose(&mut self) {
-        self.verbose = true
     }
 }
 
@@ -103,18 +94,12 @@ where
         self.stop()?;
         let mut rx = self.topic.subscribe();
         let inner = Arc::clone(&self.inner);
-        let verbose = self.verbose;
-        if verbose {
-            info!("[dynamic config] Verbose on")
-        }
         let handle = tokio::spawn(async move {
             loop {
                 if let Ok(new) = rx.recv().await {
                     let new = new.try_into().unwrap_or_else(|_| inner.lock().clone());
                     *inner.lock() = new;
-                    if verbose {
-                        info!("[dynamic config] Successfully updated configuration")
-                    }
+                    trace!("[KOSEI] updated dynamic configuration")
                 }
             }
         });
@@ -124,9 +109,6 @@ where
 
     fn stop(&mut self) -> Result<(), Error> {
         if let Some(handle) = self.handle.take() {
-            if self.verbose {
-                info!("[dynamic config] Stopping listening for configuration updates")
-            }
             handle.abort();
         }
         self.inner_watcher.stop()
@@ -151,18 +133,3 @@ impl InnerWatcher for FileWatcher {
         }
     }
 }
-
-// #[cfg(test)]
-// mod test {
-//     use super::*;
-//
-//     #[tokio::test]
-//     async fn dynamic_config() {
-//         tracing_subscriber::fmt::init();
-//         let (_, mut watcher) =
-//             DynamicConfig::<Entry>::watch_file("../config/config.test.json");
-//         watcher.verbose();
-//         watcher.watch().unwrap();
-//         watcher.stop().unwrap();
-//     }
-// }

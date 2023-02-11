@@ -5,10 +5,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
-use tracing::{error, trace};
+use tracing::{trace, warn};
 
-const CACHE_FETCH_THRESHOLD: Duration = Duration::from_secs(30 * 60);
 // 30 minutes
+const CACHE_FETCH_THRESHOLD: Duration = Duration::from_secs(30 * 60);
 const APOLLO_HTTP_HEADER_AUTHORIZATION: &str = "Authorization";
 const APOLLO_HTTP_HEADER_TIMESTAMP: &str = "Timestamp";
 const APOLLO_SIG_DELIMITER: &str = "\n";
@@ -16,12 +16,12 @@ const APOLLO_SIG_DELIMITER: &str = "\n";
 #[derive(Clone)]
 pub struct ApolloClient {
     server_url: String,
-    appid: String,
-    cluster_name: String,
-    namespace_name: String,
-    namespace_type: ConfigType,
-    release_key: String,
-    local_ip: String,
+    appid: Option<String>,
+    cluster_name: Option<String>,
+    namespace_name: Option<String>,
+    namespace_type: Option<ConfigType>,
+    release_key: Option<String>,
+    local_ip: Option<String>,
     secret: Option<String>,
 }
 
@@ -44,39 +44,30 @@ pub struct ApolloWatcher {
     handle: Option<JoinHandle<()>>,
 }
 
-impl Default for ApolloClient {
-    fn default() -> Self {
-        Self {
-            server_url: "".to_string(),
-            appid: "".to_string(),
-            cluster_name: "default".to_string(),
-            namespace_name: "application.txt".to_string(),
-            release_key: "".to_string(),
-            local_ip: "".to_string(),
-            namespace_type: ConfigType::TOML,
-            secret: None,
-        }
-    }
-}
-
 impl ApolloClient {
     // a http uri, such as 'http://localhost:8080'
     pub fn new(uri: &str) -> Self {
         Self {
             server_url: uri.trim_end_matches('/').to_string(),
-            ..Default::default()
+            appid: None,
+            cluster_name: Some("default".to_string()),
+            namespace_name: Some("application.txt".to_string()),
+            release_key: None,
+            local_ip: None,
+            namespace_type: None,
+            secret: None,
         }
     }
 
     // Required
     pub fn appid(mut self, id: &str) -> Self {
-        self.appid = id.to_string();
+        self.appid = Some(id.to_string());
         self
     }
 
     // Required, default set to `default`
     pub fn cluster(mut self, cluster: &str) -> Self {
-        self.cluster_name = cluster.to_string();
+        self.cluster_name = Some(cluster.to_string());
         self
     }
 
@@ -85,41 +76,38 @@ impl ApolloClient {
     // NOTICE: yaml not yml
     pub fn namespace(mut self, ns: &str, typ: ConfigType) -> Self {
         match typ {
-            ConfigType::TOML => {
-                self.namespace_name = format!("{}.txt", ns);
-                self.namespace_type = ConfigType::TOML;
-            }
+            // ConfigType::TOML => {
+            //     self.namespace_name = Some(format!("{}.txt", ns)); // While apollo dose not support toml, use txt instead.
+            //     self.namespace_type = Some(ConfigType::TOML);
+            // }
             ConfigType::YAML => {
-                self.namespace_name = format!("{}.yaml", ns);
-                self.namespace_type = ConfigType::YAML;
+                self.namespace_name = Some(format!("{}.yaml", ns));
+                self.namespace_type = Some(ConfigType::YAML);
             }
             ConfigType::JSON => {
-                self.namespace_name = format!("{}.json", ns);
-                self.namespace_type = ConfigType::JSON;
+                self.namespace_name = Some(format!("{}.json", ns));
+                self.namespace_type = Some(ConfigType::JSON);
             }
+            ConfigType::TOML => panic!("Apollo dose not support toml yet"),
         }
         self
     }
 
+    // Optional
     pub fn secret(mut self, access_secret: &str) -> Self {
         self.secret = Some(access_secret.to_string());
         self
     }
 
-    pub fn some_secret(mut self, access_secret: Option<&str>) -> Self {
-        self.secret = access_secret.map(ToString::to_string);
-        self
-    }
-
     // Optional
     pub fn release_key(mut self, key: &str) -> Self {
-        self.release_key = key.to_string();
+        self.release_key = Some(key.to_string());
         self
     }
 
     // Optional
-    pub fn local_id(mut self, ip: &str) -> Self {
-        self.local_ip = ip.to_string();
+    pub fn local_ip(mut self, ip: &str) -> Self {
+        self.local_ip = Some(ip.to_string());
         self
     }
 
@@ -196,7 +184,7 @@ impl ApolloClient {
 
     fn request_builder(&self, url: &str) -> reqwest::ClientBuilder {
         let client_builder = reqwest::Client::builder();
-        if let Some(secret) = &self.secret {
+        if let Some(ref secret) = self.secret {
             let path_with_query = url.trim_start_matches(&self.server_url);
 
             let mut mac = Hmac::<sha1::Sha1>::new_from_slice(secret.as_bytes())
@@ -214,7 +202,7 @@ impl ApolloClient {
                     "{}{}{}",
                     timestamp_millis, APOLLO_SIG_DELIMITER, path_with_query
                 )
-                    .as_bytes(),
+                .as_bytes(),
             );
 
             let sig_arr = mac.finalize().into_bytes();
@@ -223,7 +211,13 @@ impl ApolloClient {
             let mut headers = reqwest::header::HeaderMap::new();
             headers.insert(
                 APOLLO_HTTP_HEADER_AUTHORIZATION,
-                format!("Apollo {}:{}", self.appid, sig).parse().unwrap(),
+                format!(
+                    "Apollo {}:{}",
+                    self.appid.as_deref().expect("Require apollo appid defined"),
+                    sig
+                )
+                .parse()
+                .unwrap(),
             );
             headers.insert(
                 APOLLO_HTTP_HEADER_TIMESTAMP,
@@ -239,11 +233,17 @@ impl ApolloClient {
         format!(
             "{server_url}/configs/{appid}/{cluster}/{namespace}?releaseKey={rk}&ip={ip}",
             server_url = self.server_url,
-            appid = self.appid,
-            cluster = self.cluster_name,
-            namespace = self.namespace_name,
-            rk = self.release_key,
-            ip = self.local_ip
+            appid = self.appid.as_deref().expect("Require apollo appid defined"),
+            cluster = self
+                .cluster_name
+                .as_deref()
+                .expect("Require apollo cluster defined"),
+            namespace = self
+                .namespace_name
+                .as_deref()
+                .expect("Require namespace defined"),
+            rk = self.release_key.as_deref().unwrap_or_default(),
+            ip = self.local_ip.as_deref().unwrap_or_default()
         )
     }
 
@@ -251,39 +251,49 @@ impl ApolloClient {
         format!(
             "{server_url}/configfiles/json/{appid}/{cluster}/{namespace}?ip={ip}",
             server_url = self.server_url,
-            appid = self.appid,
-            cluster = self.cluster_name,
-            namespace = self.namespace_name,
-            ip = self.local_ip
+            appid = self.appid.as_deref().expect("Require apollo appid defined"),
+            cluster = self
+                .cluster_name
+                .as_deref()
+                .expect("Require apollo cluster defined"),
+            namespace = self
+                .namespace_name
+                .as_deref()
+                .expect("Require namespace defined"),
+            ip = self.local_ip.clone().unwrap_or_default()
         )
     }
 
     fn notify_url(&self, notify_id: isize) -> String {
+        let cluster = self
+            .namespace_name
+            .as_deref()
+            .expect("Require namespace defined");
         let notify = format!(
             r#"[{{"namespaceName": "{}", "notificationId": {}}}]"#,
-            self.namespace_name, notify_id
+            cluster, notify_id
         );
         format!(
             "{server_url}/notifications/v2?appId={appid}&cluster={cluster}&notifications={notify}",
             server_url = self.server_url,
-            appid = self.appid,
-            cluster = self.cluster_name,
+            appid = self.appid.as_deref().expect("Require apollo appid defined"),
+            cluster = cluster,
             notify = urlencoding::encode(&notify)
         )
     }
 }
 
 impl<T> Config<T>
-    where
-        T: serde::de::DeserializeOwned,
+where
+    T: serde::de::DeserializeOwned,
 {
     pub async fn from_apollo(client: &ApolloClient) -> Result<Self, Error> {
         let (raw_str, _) = client.fetch().await?;
         let config: Config<T> = Raw {
             raw_str,
-            typ: client.namespace_type,
+            typ: client.namespace_type.expect("Require namespace defined"),
         }
-            .try_into()?;
+        .try_into()?;
         Ok(config)
     }
 }
@@ -309,16 +319,16 @@ impl ApolloWatcher {
                     if topic
                         .send(Raw {
                             raw_str,
-                            typ: client.namespace_type,
+                            typ: client.namespace_type.expect("Require namespace defined"),
                         })
                         .is_err()
                     {
-                        error!("[dynamic config] Unable to send fetched configuration updates from Apollo, DynamicConfigWatcher may work incorrectly");
+                        warn!("[KOSEI] unable to send fetched configuration updates from Apollo, DynamicConfigWatcher may work incorrectly");
                         break;
                     }
-                    trace!("[dynamic config] Successfully fetched configuration from Apollo")
+                    trace!("[KOSEI] successfully fetched configuration from Apollo")
                 } else {
-                    error!("[dynamic config] Unable to fetch configuration updates from Apollo")
+                    warn!("[KOSEI] unable to fetch configuration updates from Apollo")
                 }
             }
         });
@@ -336,28 +346,28 @@ impl ApolloWatcher {
             loop {
                 if let Ok(new_id) = client.notification_fetch(notify_id).await {
                     if new_id == notify_id {
-                        trace!("[dynamic config] notification id is already the latest, continue to fetch a new notification");
+                        trace!("[KOSEI] notification id is already the latest, continue to fetch a new notification");
                         continue;
                     }
-                    trace!("[dynamic config] notification id updated from {} to {}, start to fetch configuration", notify_id, new_id);
+                    trace!("[KOSEI] notification id updated from {} to {}, start to fetch configuration", notify_id, new_id);
                     notify_id = new_id;
                     if let Ok((raw_str, _)) = client.fetch().await {
                         if topic
                             .send(Raw {
                                 raw_str,
-                                typ: client.namespace_type,
+                                typ: client.namespace_type.expect("Require namespace defined"),
                             })
                             .is_err()
                         {
-                            error!("[dynamic config] Unable to send fetched configuration updates from Apollo, DynamicConfigWatcher may work incorrectly");
+                            warn!("[KOSEI] unable to send fetched configuration updates from Apollo, DynamicConfigWatcher may work incorrectly");
                             break;
                         }
-                        trace!("[dynamic config] Successfully fetched configuration from Apollo")
+                        trace!("[KOSEI] successfully fetched configuration from Apollo")
                     } else {
-                        error!("[dynamic config] Unable to fetch configuration updates from Apollo")
+                        warn!("[KOSEI] unable to fetch configuration updates from Apollo")
                     }
                 } else {
-                    error!("[dynamic config] Unable to fetch notifications from Apollo")
+                    warn!("[KOSEI] unable to fetch notifications from Apollo")
                 }
             }
         });
@@ -388,8 +398,8 @@ impl InnerWatcher for ApolloWatcher {
 
 #[cfg(feature = "dynamic")]
 impl<T> DynamicConfig<T>
-    where
-        T: serde::de::DeserializeOwned + Clone + 'static,
+where
+    T: serde::de::DeserializeOwned + Clone + 'static,
 {
     pub async fn watch_apollo(
         client: ApolloClient,
@@ -409,7 +419,6 @@ impl<T> DynamicConfig<T>
             inner_watcher,
             handle: None,
             topic,
-            verbose: false,
         };
         (Self(config), watcher)
     }

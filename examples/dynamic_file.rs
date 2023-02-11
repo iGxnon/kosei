@@ -20,7 +20,6 @@ fn swap(before: String) -> String {
 #[tokio::main]
 async fn main() {
     let (config, mut watcher) = DynamicConfig::<Entry>::watch_file("examples/config.toml");
-    watcher.verbose();
     watcher.watch().unwrap();
     {
         let guard = config.lock();
