@@ -1,92 +1,167 @@
-use super::*;
+use crate::{
+    Config, ConfigType, DynamicConfig, DynamicConfigWatcher, Error, InnerWatcher, Raw,
+    DEFAULT_BUFFER_SIZE,
+};
 use hmac::{Hmac, Mac};
 use parking_lot::Mutex;
+use reqwest::header::HeaderMap;
+use reqwest::{Client, IntoUrl, Url};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tracing::{trace, warn};
 
-// 30 minutes
+// fetch notification will take about 1 min to respond, remain 30s for timeout.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(90);
 const CACHE_FETCH_THRESHOLD: Duration = Duration::from_secs(30 * 60);
 const APOLLO_HTTP_HEADER_AUTHORIZATION: &str = "Authorization";
 const APOLLO_HTTP_HEADER_TIMESTAMP: &str = "Timestamp";
 const APOLLO_SIG_DELIMITER: &str = "\n";
 
 #[derive(Clone)]
-pub struct ApolloClient {
-    server_url: String,
-    appid: Option<String>,
-    cluster_name: Option<String>,
-    namespace_name: Option<String>,
-    namespace_type: Option<ConfigType>,
-    release_key: Option<String>,
+pub struct Builder {
+    // Require
+    server_url: Url,
+    // Require
+    app_id: String,
+    // Require
+    cluster_name: String,
+    // Require
+    namespace: String,
+    // Require
+    namespace_type: ConfigType,
+    // Optional
     local_ip: Option<String>,
+    // Optional
     secret: Option<String>,
 }
 
-// releaseKey
-#[derive(Debug, Default, Clone)]
-pub struct Metadata(String);
+type Endpoint<U> = (U, String);
+// (url, path)
+type NotifyEndpoint = (fn(&Builder, isize) -> Url, fn(&Builder, isize) -> String);
 
-#[cfg(feature = "dynamic")]
-pub enum WatchMode {
-    RealTime,
-    // RealTime configuration updating (about 1s, based on Http long polling)
-    Interval(Duration), // Each interval is updated, preferably greater than 30s, several hours or days are recommended
+#[derive(Clone)]
+struct Endpoints {
+    nocache_endpoint: Endpoint<Url>,
+    cached_endpoint: Endpoint<Url>,
+    notify_endpoint: NotifyEndpoint,
+    conf: Builder,
 }
 
-#[cfg(feature = "dynamic")]
-pub struct ApolloWatcher {
-    client: ApolloClient,
-    tx: broadcast::Sender<Raw>,
-    mode: WatchMode,
-    handle: Option<JoinHandle<()>>,
+impl Endpoints {
+    #[inline]
+    async fn nocache_fetch(&self, client: &ApolloClient) -> Result<String, Error> {
+        let config = client
+            .http_client
+            .get(self.nocache_endpoint.0.clone())
+            .headers(self.conf.auth_headers(self.nocache_endpoint.1.as_str()))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<serde_json::Value>()
+            .await?
+            .get("configurations")
+            .and_then(|v| v.get("content"))
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "".to_string());
+        Ok(config)
+    }
+
+    #[inline]
+    async fn cache_fetch(&self, client: &ApolloClient) -> Result<String, Error> {
+        let config = client
+            .http_client
+            .get(self.cached_endpoint.0.clone())
+            .headers(self.conf.auth_headers(self.cached_endpoint.1.as_str()))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<serde_json::Value>()
+            .await?
+            .get("content")
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "".to_string());
+        Ok(config)
+    }
+
+    #[inline]
+    async fn notification_fetch(
+        &self,
+        client: &ApolloClient,
+        notify_id: isize,
+    ) -> Result<isize, Error> {
+        let resp = client
+            .http_client
+            .get(self.notify_endpoint.0(&self.conf, notify_id))
+            .headers(
+                self.conf
+                    .auth_headers(self.notify_endpoint.1(&self.conf, notify_id).as_str()),
+            )
+            .send()
+            .await?
+            .error_for_status()?;
+        if resp.status().as_u16() == 304 {
+            return Ok(notify_id);
+        }
+        let new_id = resp
+            .json::<serde_json::Value>()
+            .await?
+            .as_array()
+            .and_then(|v| v.first())
+            .and_then(|v| v.get("notificationId"))
+            .and_then(|v| v.as_i64())
+            .map(|v| v as isize)
+            .unwrap_or(notify_id);
+        Ok(new_id)
+    }
 }
 
-impl ApolloClient {
-    // a http uri, such as 'http://localhost:8080'
-    pub fn new(uri: &str) -> Self {
+impl Default for Builder {
+    fn default() -> Self {
         Self {
-            server_url: uri.trim_end_matches('/').to_string(),
-            appid: None,
-            cluster_name: Some("default".to_string()),
-            namespace_name: Some("application.txt".to_string()),
-            release_key: None,
+            server_url: Url::parse("http://127.0.0.1:8080/").unwrap(),
+            app_id: "default".into(),
+            cluster_name: "default".into(),
+            namespace: "config".into(),
+            namespace_type: ConfigType::YAML,
             local_ip: None,
-            namespace_type: None,
             secret: None,
         }
     }
+}
 
-    // Required
-    pub fn appid(mut self, id: &str) -> Self {
-        self.appid = Some(id.to_string());
+impl Builder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn server_url(mut self, url: impl IntoUrl) -> Self {
+        self.server_url = url.into_url().expect("Not a valid url");
         self
     }
 
-    // Required, default set to `default`
-    pub fn cluster(mut self, cluster: &str) -> Self {
-        self.cluster_name = Some(cluster.to_string());
+    pub fn app_id(mut self, app_id: impl ToString) -> Self {
+        self.app_id = app_id.to_string();
         self
     }
 
-    // Required
-    // config namespace without suffix type
-    // NOTICE: yaml not yml
-    pub fn namespace(mut self, ns: &str, typ: ConfigType) -> Self {
+    pub fn cluster(mut self, cluster: impl ToString) -> Self {
+        self.cluster_name = cluster.to_string();
+        self
+    }
+
+    pub fn namespace(mut self, ns: impl AsRef<str>, typ: ConfigType) -> Self {
         match typ {
-            // ConfigType::TOML => {
-            //     self.namespace_name = Some(format!("{}.txt", ns)); // While apollo dose not support toml, use txt instead.
-            //     self.namespace_type = Some(ConfigType::TOML);
-            // }
             ConfigType::YAML => {
-                self.namespace_name = Some(format!("{}.yaml", ns));
-                self.namespace_type = Some(ConfigType::YAML);
+                self.namespace = format!("{}.yaml", ns.as_ref());
+                self.namespace_type = ConfigType::YAML;
             }
             ConfigType::JSON => {
-                self.namespace_name = Some(format!("{}.json", ns));
-                self.namespace_type = Some(ConfigType::JSON);
+                self.namespace = format!("{}.json", ns.as_ref());
+                self.namespace_type = ConfigType::JSON;
             }
             ConfigType::TOML => panic!("Apollo dose not support toml yet"),
         }
@@ -100,93 +175,81 @@ impl ApolloClient {
     }
 
     // Optional
-    pub fn release_key(mut self, key: &str) -> Self {
-        self.release_key = Some(key.to_string());
-        self
-    }
-
-    // Optional
     pub fn local_ip(mut self, ip: &str) -> Self {
         self.local_ip = Some(ip.to_string());
         self
     }
 
-    // Not support `.properties`
-    // NOTICE: make sure namespace had been published and set to a support config type
-    // (responses should contains `configurations.content`)
-    pub async fn fetch(&self) -> Result<(String, Metadata), Error> {
-        let url = self.nocache_url();
-        let resp = self.request_builder(&url).build()?.get(url).send().await?;
-
-        resp.error_for_status_ref()?;
-
-        let resp = resp.json::<serde_json::Value>().await?;
-
-        let config = resp
-            .get("configurations")
-            .and_then(|v| v.get("content"))
-            .and_then(|v| v.as_str())
-            .map(ToString::to_string)
-            .unwrap_or_else(|| "".to_string());
-
-        let release_key = resp
-            .get("releaseKey")
-            .and_then(|v| v.as_str())
-            .map(ToString::to_string)
-            .unwrap_or_else(|| "".to_string());
-        Ok((config, Metadata(release_key)))
-    }
-
-    pub async fn cached_fetch(&self) -> Result<String, Error> {
-        let url = self.cached_url();
-        let resp = self.request_builder(&url).build()?.get(url).send().await?;
-
-        resp.error_for_status_ref()?;
-
-        let config = resp
-            .json::<serde_json::Value>()
-            .await?
-            .get("content")
-            .and_then(|v| v.as_str())
-            .map(ToString::to_string)
-            .unwrap_or_else(|| "".to_string());
-        Ok(config)
-    }
-
-    // fetch notification id, if not updated, returns the same as the input notify_id.
-    pub async fn notification_fetch(&self, notify_id: isize) -> Result<isize, Error> {
-        let url = self.notify_url(notify_id);
-        let resp = self
-            .request_builder(&url)
-            .timeout(Duration::from_secs(70))
-            .build()?
-            .get(url)
-            .send()
-            .await?;
-
-        resp.error_for_status_ref()?;
-
-        if resp.status().as_u16() == 304 {
-            return Ok(notify_id);
+    pub fn finish(self) -> ApolloClient {
+        let nocache_path = format!(
+            "/configs/{app_id}/{cluster}/{namespace}?ip={ip}",
+            app_id = self.app_id,
+            cluster = self.cluster_name,
+            namespace = self.namespace,
+            ip = self.local_ip.as_deref().unwrap_or_default()
+        );
+        let cache_path = format!(
+            "/configfiles/json/{app_id}/{cluster}/{namespace}?ip={ip}",
+            app_id = self.app_id,
+            cluster = self.cluster_name,
+            namespace = self.namespace,
+            ip = self.local_ip.as_deref().unwrap_or_default()
+        );
+        fn notify_path(conf: &Builder, notify_id: isize) -> String {
+            let notify = format!(
+                r#"[{{"namespaceName": "{}", "notificationId": {}}}]"#,
+                conf.namespace, notify_id
+            );
+            format!(
+                "/notifications/v2?appId={app_id}&cluster={cluster}&notifications={notify}",
+                app_id = conf.app_id,
+                cluster = conf.cluster_name,
+                notify = urlencoding::encode(&notify)
+            )
+        }
+        fn notify_url(conf: &Builder, notify_id: isize) -> Url {
+            Url::parse(&format!(
+                "{}{}",
+                conf.server_url.as_str().trim_end_matches('/'),
+                notify_path(conf, notify_id)
+            ))
+            .expect("Url::parse")
         }
 
-        let new_id = resp
-            .json::<serde_json::Value>()
-            .await?
-            .as_array()
-            .and_then(|v| v.first())
-            .and_then(|v| v.get("notificationId"))
-            .and_then(|v| v.as_i64())
-            .map(|v| v as isize)
-            .unwrap_or(notify_id);
-        Ok(new_id)
+        ApolloClient {
+            http_client: Client::builder()
+                .timeout(DEFAULT_TIMEOUT)
+                .build()
+                .expect("Cannot build http client"),
+            endpoints: Endpoints {
+                nocache_endpoint: (
+                    Url::parse(&format!(
+                        "{}{}",
+                        self.server_url.as_str().trim_end_matches('/'),
+                        nocache_path
+                    ))
+                    .expect("Url::parse"),
+                    nocache_path,
+                ),
+                cached_endpoint: (
+                    Url::parse(&format!(
+                        "{}{}",
+                        self.server_url.as_str().trim_end_matches('/'),
+                        cache_path
+                    ))
+                    .expect("Url::parse"),
+                    cache_path,
+                ),
+                notify_endpoint: (notify_url, notify_path),
+                conf: self,
+            },
+        }
     }
 
-    fn request_builder(&self, url: &str) -> reqwest::ClientBuilder {
-        let client_builder = reqwest::Client::builder();
-        if let Some(ref secret) = self.secret {
-            let path_with_query = url.trim_start_matches(&self.server_url);
-
+    #[inline]
+    fn auth_headers(&self, path_with_query: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        if let Some(secret) = self.secret.as_deref() {
             let mut mac = Hmac::<sha1::Sha1>::new_from_slice(secret.as_bytes())
                 .expect("HMAC can take key of any size");
 
@@ -208,78 +271,36 @@ impl ApolloClient {
             let sig_arr = mac.finalize().into_bytes();
             let sig = base64::encode(sig_arr);
 
-            let mut headers = reqwest::header::HeaderMap::new();
             headers.insert(
                 APOLLO_HTTP_HEADER_AUTHORIZATION,
-                format!(
-                    "Apollo {}:{}",
-                    self.appid.as_deref().expect("Require apollo appid defined"),
-                    sig
-                )
-                .parse()
-                .unwrap(),
+                format!("Apollo {}:{}", self.app_id, sig).parse().unwrap(),
             );
             headers.insert(
                 APOLLO_HTTP_HEADER_TIMESTAMP,
                 timestamp_millis.to_string().parse().unwrap(),
             );
-
-            return client_builder.default_headers(headers);
         }
-        client_builder
+        headers
+    }
+}
+
+#[derive(Clone)]
+pub struct ApolloClient {
+    http_client: Client,
+    endpoints: Endpoints,
+}
+
+impl ApolloClient {
+    pub async fn fetch(&self) -> Result<String, Error> {
+        self.endpoints.nocache_fetch(self).await
     }
 
-    fn nocache_url(&self) -> String {
-        format!(
-            "{server_url}/configs/{appid}/{cluster}/{namespace}?releaseKey={rk}&ip={ip}",
-            server_url = self.server_url,
-            appid = self.appid.as_deref().expect("Require apollo appid defined"),
-            cluster = self
-                .cluster_name
-                .as_deref()
-                .expect("Require apollo cluster defined"),
-            namespace = self
-                .namespace_name
-                .as_deref()
-                .expect("Require namespace defined"),
-            rk = self.release_key.as_deref().unwrap_or_default(),
-            ip = self.local_ip.as_deref().unwrap_or_default()
-        )
+    pub async fn cached_fetch(&self) -> Result<String, Error> {
+        self.endpoints.cache_fetch(self).await
     }
 
-    fn cached_url(&self) -> String {
-        format!(
-            "{server_url}/configfiles/json/{appid}/{cluster}/{namespace}?ip={ip}",
-            server_url = self.server_url,
-            appid = self.appid.as_deref().expect("Require apollo appid defined"),
-            cluster = self
-                .cluster_name
-                .as_deref()
-                .expect("Require apollo cluster defined"),
-            namespace = self
-                .namespace_name
-                .as_deref()
-                .expect("Require namespace defined"),
-            ip = self.local_ip.clone().unwrap_or_default()
-        )
-    }
-
-    fn notify_url(&self, notify_id: isize) -> String {
-        let cluster = self
-            .namespace_name
-            .as_deref()
-            .expect("Require namespace defined");
-        let notify = format!(
-            r#"[{{"namespaceName": "{}", "notificationId": {}}}]"#,
-            cluster, notify_id
-        );
-        format!(
-            "{server_url}/notifications/v2?appId={appid}&cluster={cluster}&notifications={notify}",
-            server_url = self.server_url,
-            appid = self.appid.as_deref().expect("Require apollo appid defined"),
-            cluster = cluster,
-            notify = urlencoding::encode(&notify)
-        )
+    pub async fn notification_fetch(&self, notify_id: isize) -> Result<isize, Error> {
+        self.endpoints.notification_fetch(self, notify_id).await
     }
 }
 
@@ -288,14 +309,29 @@ where
     T: serde::de::DeserializeOwned,
 {
     pub async fn from_apollo(client: &ApolloClient) -> Result<Self, Error> {
-        let (raw_str, _) = client.fetch().await?;
+        let raw_str = client.fetch().await?;
         let config: Config<T> = Raw {
             raw_str,
-            typ: client.namespace_type.expect("Require namespace defined"),
+            typ: client.endpoints.conf.namespace_type,
         }
         .try_into()?;
         Ok(config)
     }
+}
+
+#[cfg(feature = "dynamic")]
+pub enum WatchMode {
+    RealTime,
+    // RealTime configuration updating (about 1s, based on Http long polling)
+    Interval(Duration), // Each interval is updated, preferably greater than 30s, several hours or days are recommended
+}
+
+#[cfg(feature = "dynamic")]
+pub struct ApolloWatcher {
+    client: ApolloClient,
+    tx: broadcast::Sender<Raw>,
+    mode: WatchMode,
+    handle: Option<JoinHandle<()>>,
 }
 
 #[cfg(feature = "dynamic")]
@@ -311,7 +347,7 @@ impl ApolloWatcher {
             loop {
                 interval.tick().await;
                 let ret = if period > CACHE_FETCH_THRESHOLD {
-                    client.fetch().await.map(|v| v.0)
+                    client.fetch().await
                 } else {
                     client.cached_fetch().await
                 };
@@ -319,7 +355,7 @@ impl ApolloWatcher {
                     if topic
                         .send(Raw {
                             raw_str,
-                            typ: client.namespace_type.expect("Require namespace defined"),
+                            typ: client.endpoints.conf.namespace_type,
                         })
                         .is_err()
                     {
@@ -351,11 +387,11 @@ impl ApolloWatcher {
                     }
                     trace!("[KOSEI] notification id updated from {} to {}, start to fetch configuration", notify_id, new_id);
                     notify_id = new_id;
-                    if let Ok((raw_str, _)) = client.fetch().await {
+                    if let Ok(raw_str) = client.fetch().await {
                         if topic
                             .send(Raw {
                                 raw_str,
-                                typ: client.namespace_type.expect("Require namespace defined"),
+                                typ: client.endpoints.conf.namespace_type,
                             })
                             .is_err()
                         {

@@ -1,4 +1,5 @@
-use kosei::{ApolloClient, Config, ConfigType};
+use kosei::apollo::Builder;
+use kosei::{Config, ConfigType};
 use serde::Deserialize;
 
 #[derive(Deserialize, Clone, Debug)]
@@ -9,10 +10,12 @@ struct Entry {
 
 #[tokio::main]
 async fn main() {
-    let client = ApolloClient::new("http://localhost:8080")
-        .appid("test")
-        .secret("e97a455f259a464982a6593ab8af0ad5") // add secret key
-        .namespace("test", ConfigType::TOML);
+    let client = Builder::new()
+        .app_id("test")
+        .secret("e97a455f259a464982a6593ab8af0ad5")
+        .namespace("test", ConfigType::YAML)
+        .server_url("http://localhost:8080")
+        .finish();
 
     let entry = Config::<Entry>::from_apollo(&client)
         .await

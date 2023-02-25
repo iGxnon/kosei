@@ -3,20 +3,177 @@ use crate::{
     DEFAULT_BUFFER_SIZE,
 };
 use parking_lot::Mutex;
+use reqwest::{Client, IntoUrl, Url};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tracing::{trace, warn};
 
+pub struct Builder {
+    server_url: Url,
+    // Require
+    data_id: String,
+    // Require
+    group: String,
+    // Require
+    config_type: ConfigType,
+    // Require
+    credential: Option<(String, String)>,
+}
+
+impl Default for Builder {
+    fn default() -> Self {
+        Self {
+            server_url: Url::parse("http://localhost:8848").expect("Url::parse"),
+            data_id: "test".into(),
+            group: "DEFAULT_GROUP".into(),
+            config_type: ConfigType::YAML,
+            credential: None,
+        }
+    }
+}
+
+impl Builder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn server_url(mut self, url: impl IntoUrl) -> Self {
+        self.server_url = url.into_url().expect("Into url failed");
+        self
+    }
+
+    pub fn data_id(mut self, data_id: impl ToString) -> Self {
+        self.data_id = data_id.to_string();
+        self
+    }
+
+    pub fn config_type(mut self, config_type: ConfigType) -> Self {
+        self.config_type = config_type;
+        self
+    }
+
+    pub fn credential(mut self, username: impl ToString, password: impl ToString) -> Self {
+        self.credential = Some((username.to_string(), password.to_string()));
+        self
+    }
+
+    pub fn group(mut self, group: impl ToString) -> Self {
+        self.group = group.to_string();
+        self
+    }
+
+    pub fn finish(self) -> NacosClient {
+        let url = Url::parse(&format!(
+            "{server_url}/nacos/v1/cs/configs?dataId={data_id}&group={group}",
+            server_url = self.server_url.as_str().trim_end_matches('/'),
+            data_id = self.data_id,
+            group = self.group,
+        ))
+        .expect("Url::parse");
+        let endpoint = match self.credential {
+            None => Endpoint::Normal(url),
+            Some(credential) => Endpoint::Auth {
+                url: Arc::new(Mutex::new(url)),
+                login_url: Url::parse(&format!(
+                    "{}/nacos/v1/auth/login",
+                    self.server_url.as_str().trim_end_matches('/')
+                ))
+                .expect("Url::parse"),
+                credential,
+            },
+        };
+        NacosClient {
+            http_client: Client::new(),
+            endpoint,
+            typ: self.config_type,
+        }
+    }
+}
+
+#[derive(Clone)]
+enum Endpoint {
+    Normal(Url),
+    Auth {
+        url: Arc<Mutex<Url>>,
+        login_url: Url,
+        credential: (String, String),
+    },
+}
+
+impl Endpoint {
+    #[inline]
+    fn to_url(&self) -> Url {
+        match self {
+            Endpoint::Normal(v) => v.clone(),
+            Endpoint::Auth { url, .. } => {
+                let guard = url.lock();
+                guard.clone()
+            }
+        }
+    }
+
+    #[inline]
+    async fn update_access_token(&self, client: &NacosClient) -> Result<Url, Error> {
+        if let Endpoint::Auth {
+            url,
+            login_url,
+            credential,
+        } = self
+        {
+            let new_access = client
+                .http_client
+                .post(login_url.clone())
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(format!(
+                    "username={}&password={}",
+                    credential.0, credential.1
+                ))
+                .send()
+                .await?
+                .error_for_status()?
+                .json::<serde_json::Value>()
+                .await?
+                .get("accessToken")
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "".to_string());
+            let mut guard = url.lock();
+            let mut queries: Vec<_> = guard
+                .query_pairs()
+                .into_iter()
+                .filter(|(k, _)| k != "accessToken")
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            queries.push(("accessToken".to_string(), new_access));
+            guard.query_pairs_mut().clear();
+            let new_url = Url::parse_with_params(guard.as_ref(), queries)?;
+            *guard = new_url;
+            return Ok(guard.clone());
+        }
+        Ok(self.to_url())
+    }
+
+    #[inline]
+    async fn fetch(&self, client: &NacosClient) -> Result<String, Error> {
+        let mut resp = client.http_client.get(self.to_url()).send().await?;
+        if resp.status().is_client_error() {
+            // token expired
+            let new_url = self.update_access_token(client).await?;
+            resp = client.http_client.get(new_url).send().await?;
+        }
+        resp.error_for_status_ref()?;
+        let raw = resp.text().await?;
+        Ok(raw)
+    }
+}
+
 #[derive(Clone)]
 pub struct NacosClient {
-    server_url: String,
-    data_id: Option<String>,
-    group: Option<String>,
-    typ: Option<ConfigType>,
-    credential: Option<(String, String)>,
-    access_token: Option<String>,
+    http_client: Client,
+    endpoint: Endpoint,
+    typ: ConfigType,
 }
 
 #[cfg(feature = "dynamic")]
@@ -28,93 +185,8 @@ pub struct NacosWatcher {
 }
 
 impl NacosClient {
-    pub fn new(uri: &str) -> Self {
-        Self {
-            server_url: uri.trim_end_matches('/').to_string(),
-            data_id: None,
-            group: Some("DEFAULT_GROUP".to_string()),
-            typ: None,
-            credential: None,
-            access_token: None,
-        }
-    }
-
-    // Required
-    pub fn data_id(mut self, data_id: &str) -> Self {
-        self.data_id = Some(data_id.to_string());
-        self
-    }
-
-    // Required
-    pub fn config_type(mut self, typ: ConfigType) -> Self {
-        self.typ = Some(typ);
-        self
-    }
-
-    // Optional
-    pub fn group(mut self, group: &str) -> Self {
-        self.group = Some(group.to_string());
-        self
-    }
-
-    pub fn credential(mut self, username: &str, password: &str) -> Self {
-        self.credential = Some((username.to_string(), password.to_string()));
-        self
-    }
-
-    pub async fn fetch(&mut self) -> Result<String, Error> {
-        let mut resp = reqwest::get(self.url().await?).await?;
-        if resp.status().is_client_error() {
-            // token expired
-            self.access_token.take();
-            resp = reqwest::get(self.url().await?).await?;
-        }
-        resp.error_for_status_ref()?;
-        let raw = resp.text().await?;
-        Ok(raw)
-    }
-
-    async fn url(&mut self) -> Result<String, Error> {
-        match self.credential {
-            None => Ok(format!(
-                "{server_url}/nacos/v1/cs/configs?dataId={data_id}&group={group}",
-                server_url = self.server_url,
-                data_id = self.data_id.as_deref().expect("Require data id defined"),
-                group = self.group.as_deref().expect("Require group defined"),
-            )),
-            Some((ref username, ref password)) => {
-                let access = match self.access_token {
-                    Some(ref access) => access.to_string(),
-                    None => {
-                        let login_url = format!("{}/nacos/v1/auth/login", self.server_url);
-                        let resp = reqwest::Client::builder()
-                            .build()?
-                            .post(login_url)
-                            .header("content-type", "application/x-www-form-urlencoded")
-                            .body(format!("username={}&password={}", username, password))
-                            .send()
-                            .await?;
-                        resp.error_for_status_ref()?;
-                        let new_access = resp
-                            .json::<serde_json::Value>()
-                            .await?
-                            .get("accessToken")
-                            .and_then(|v| v.as_str())
-                            .map(ToString::to_string)
-                            .unwrap_or_else(|| "".to_string());
-                        self.access_token = Some(new_access.clone());
-                        new_access
-                    }
-                };
-                Ok(format!(
-                    "{server_url}/nacos/v1/cs/configs?dataId={data_id}&group={group}&accessToken={access}",
-                    server_url = self.server_url,
-                    data_id = self.data_id.as_deref().expect("Require data id defined"),
-                    group = self.group.as_deref().expect("Require group defined"),
-                    access = access
-                ))
-            }
-        }
+    pub async fn fetch(&self) -> Result<String, Error> {
+        self.endpoint.fetch(self).await
     }
 }
 
@@ -122,11 +194,11 @@ impl<T> Config<T>
 where
     T: serde::de::DeserializeOwned,
 {
-    pub async fn from_nacos(client: &mut NacosClient) -> Result<Self, Error> {
+    pub async fn from_nacos(client: &NacosClient) -> Result<Self, Error> {
         let raw_str = client.fetch().await?;
         let config: Config<T> = Raw {
             raw_str,
-            typ: client.typ.expect("Require config type defined"),
+            typ: client.typ,
         }
         .try_into()?;
         Ok(config)
@@ -137,7 +209,7 @@ where
 impl InnerWatcher for NacosWatcher {
     fn watch(&mut self) -> Result<(), Error> {
         self.stop()?;
-        let mut client = self.client.clone();
+        let client = self.client.clone();
         let topic = self.tx.clone();
         let period = self.period;
         let handle = tokio::spawn(async move {
@@ -149,7 +221,7 @@ impl InnerWatcher for NacosWatcher {
                     if topic
                         .send(Raw {
                             raw_str,
-                            typ: client.typ.expect("Require namespace defined"),
+                            typ: client.typ,
                         })
                         .is_err()
                     {
@@ -180,11 +252,11 @@ where
     T: serde::de::DeserializeOwned + Clone + 'static,
 {
     pub async fn watch_nacos(
-        mut client: NacosClient,
+        client: NacosClient,
         period: Duration,
     ) -> (Self, DynamicConfigWatcher<T, NacosWatcher>) {
         let (topic, _) = broadcast::channel::<Raw>(DEFAULT_BUFFER_SIZE);
-        let config = Config::<T>::from_nacos(&mut client).await.unwrap();
+        let config = Config::<T>::from_nacos(&client).await.unwrap();
         let config = Arc::new(Mutex::new(config));
         let inner_watcher = NacosWatcher {
             client,

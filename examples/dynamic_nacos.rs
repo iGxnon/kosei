@@ -1,4 +1,4 @@
-use kosei::{ConfigType, DynamicConfig, InnerWatcher, NacosClient};
+use kosei::{nacos::Builder, ConfigType, DynamicConfig, InnerWatcher};
 use serde::Deserialize;
 use std::time::Duration;
 
@@ -10,10 +10,12 @@ struct Entry {
 
 #[tokio::main]
 async fn main() {
-    let client = NacosClient::new("http://localhost:8848")
+    let client = Builder::new()
+        .server_url("http://localhost:8848")
         .data_id("test")
         .credential("nacos", "nacos")
-        .config_type(ConfigType::YAML);
+        .config_type(ConfigType::YAML)
+        .finish();
     let (config, mut watcher) =
         DynamicConfig::<Entry>::watch_nacos(client, Duration::from_secs(5)).await;
 

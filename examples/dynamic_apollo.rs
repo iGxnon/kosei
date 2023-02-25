@@ -1,4 +1,5 @@
-use kosei::{ApolloClient, ConfigType, DynamicConfig, InnerWatcher, WatchMode};
+use kosei::apollo::{Builder, WatchMode};
+use kosei::{ConfigType, DynamicConfig, InnerWatcher};
 use serde::Deserialize;
 use std::time::Duration;
 
@@ -10,9 +11,11 @@ struct Entry {
 
 #[tokio::main]
 async fn main() {
-    let client = ApolloClient::new("http://localhost:8080")
-        .appid("test")
-        .namespace("test", ConfigType::YAML);
+    let client = Builder::new()
+        .app_id("test")
+        .namespace("test", ConfigType::YAML)
+        .server_url("http://localhost:8080")
+        .finish();
     let (config, mut watcher) =
         DynamicConfig::<Entry>::watch_apollo(client, WatchMode::RealTime).await;
 
@@ -23,7 +26,7 @@ async fn main() {
         println!("entry: {:?}", guard.as_inner());
     }
 
-    tokio::time::sleep(Duration::from_secs(20)).await;
+    tokio::time::sleep(Duration::from_secs(10)).await;
 
     {
         let guard = config.lock();

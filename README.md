@@ -23,28 +23,12 @@
 
 [crates-url]: https://crates.io/crates/kosei
 
-## Import
+## Features
 
-- Default with dynamic file configuration
-
-```toml
-[dependencies]
-kosei = { version = "0.1" }
-```
-
-- Enable Apollo feature
-
-```toml
-[dependencies]
-kosei = { version = "0.1", features = ["apollo"] }
-```
-
-- Enable Nacos feature
-
-```toml
-[dependencies]
-kosei = { version = "0.1", features = ["nacos"] }
-```
+| dynamic    | hot-reload config support |
+| ---------- | ------------------------- |
+| **apollo** | **Apollo support**        |
+| **nacos**  | **Nacos support**         |
 
 ## Quickstart
 
@@ -97,32 +81,41 @@ async fn dynamic_test() {
 - **Dynamic Apollo config**
 
 ```rust
+use kosei::apollo::{Builder, WatchMode};
+use kosei::{ConfigType, DynamicConfig, InnerWatcher};
+use serde::Deserialize;
+use std::time::Duration;
 
-#[tokio::test]
-async fn apollo_test() {
-    // First build a ApolloClient
-    let client = ApolloClient::new("http://localhost:8080")
-        .appid("114514")
-        .namespace("test", ConfigType::TOML);
-    // Create a watcher to fetch apollo config changes at a `RealTime` mode.
-    // `Entry` indicates how data should be deserialized.
-    // The returned config type is `DynamicConfig<Entry>`
+#[derive(Deserialize, Clone, Debug)]
+struct Entry {
+    x: f64,
+    y: f64,
+}
+
+#[tokio::main]
+async fn main() {
+    let client = Builder::new()
+        .app_id("test")
+        .namespace("test", ConfigType::YAML)
+        .server_url("http://localhost:8080")
+        .finish();
     let (config, mut watcher) =
         DynamicConfig::<Entry>::watch_apollo(client, WatchMode::RealTime).await;
-    // Enable verbose mode (log messages with INFO level)
-    watcher.verbose();
-    // Start watching
+
     watcher.watch().unwrap();
 
-    println!("{:?}", config);
-    // Stop watching
-    watcher.stop().unwrap();
+    {
+        let guard = config.lock();
+        println!("entry: {:?}", guard.as_inner());
+    }
 
-    // You can start twice even you forget to call stop()
-    watcher.watch().unwrap();
+    tokio::time::sleep(Duration::from_secs(10)).await;
 
-    // All changes will be reflected to config in time
-    do_somthing(config);
+    {
+        let guard = config.lock();
+        println!("entry: {:?}", guard.as_inner());
+    }
 }
+
 
 ```
